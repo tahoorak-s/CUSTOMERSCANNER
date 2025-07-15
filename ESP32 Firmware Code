@@ -1,0 +1,89 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+// Wi-Fi
+const char* ssid = "UCEST-PO-01";
+const char* password = "jntu12345";
+
+// Firebase
+const String FIREBASE_URL = "https://rfid2-7573f-default-rtdb.firebaseio.com/";
+
+// RFID
+#define SS_PIN 5
+#define RST_PIN 22
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+String receiptId = "";
+int uidCount = 0;
+
+void startNewReceipt() {
+  receiptId = "R" + String(millis() / 1000); // Simple unique ID
+  uidCount = 0;
+  Serial.println("🧾 New Receipt Started: " + receiptId);
+}
+
+void setup() {
+  Serial.begin(115200);
+  SPI.begin();
+  rfid.PCD_Init();
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected.");
+
+  startNewReceipt(); // Start first receipt
+}
+
+void loop() {
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
+
+  String uid = "";
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    if (rfid.uid.uidByte[i] < 0x10) uid += "0";
+    uid += String(rfid.uid.uidByte[i], HEX);
+    if (i < rfid.uid.size - 1) uid += ":";
+  }
+  uid.toUpperCase();
+  Serial.println("Scanned UID: " + uid);
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+
+    // POST UID to /Receipts/{receiptId}/uids
+    String postPath = FIREBASE_URL + "Receipts/" + receiptId + "/uids.json";
+    http.begin(postPath);
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST("\"" + uid + "\"");
+    Serial.println("UID POST Response: " + String(code));
+    http.end();
+
+    uidCount++;
+
+    delay(2000); // short delay to prevent multiple scans
+  }
+
+  // 🛒 For demo: press Serial Enter to simulate "next customer"
+  if (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      // Finalize old receipt
+      if (WiFi.status() == WL_CONNECTED && uidCount > 0) {
+        HTTPClient http;
+        String path = FIREBASE_URL + "Receipts/" + receiptId + "/total items.json";
+        http.begin(path);
+        http.addHeader("Content-Type", "application/json");
+        http.PUT(String(uidCount));
+        http.end();
+      }
+      startNewReceipt();
+    }
+  }
+}
